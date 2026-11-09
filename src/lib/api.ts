@@ -14,8 +14,20 @@ import type {
 export const TOKEN_STORAGE_KEY = 'token';
 export const USER_STORAGE_KEY = 'user';
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+export const RAW_API_URL =
+  process.env.NEXT_PUBLIC_API_URL ||
+  'https://doctor-tracker-backend-care-guide.vercel.app/';
+
+function normalizeApiBaseUrl(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    return 'https://doctor-tracker-backend-care-guide.vercel.app/api';
+  }
+  return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+}
+
+export const API_BASE_URL = normalizeApiBaseUrl(RAW_API_URL);
+export const API_ORIGIN_URL = RAW_API_URL.trim().replace(/\/+$/, '');
 
 /**
  * Primary Axios instance configured for external REST API communication
@@ -607,12 +619,24 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
+    const responseDataStr =
+      typeof error.response?.data === 'string' ? error.response.data : '';
+    const isServerlessInvocationError =
+      (error.response?.status === 500 &&
+        (responseDataStr.includes('FUNCTION_INVOCATION_FAILED') ||
+          error.response?.headers?.['x-vercel-error'] ===
+            'FUNCTION_INVOCATION_FAILED')) ||
+      error.response?.status === 502 ||
+      error.response?.status === 503 ||
+      error.response?.status === 504;
+
     const isNetworkUnreachable =
-      !error.response &&
-      (error.code === 'ERR_NETWORK' ||
-        error.code === 'ECONNABORTED' ||
-        error.message?.toLowerCase().includes('network error') ||
-        error.message?.toLowerCase().includes('timeout'));
+      (!error.response &&
+        (error.code === 'ERR_NETWORK' ||
+          error.code === 'ECONNABORTED' ||
+          error.message?.toLowerCase().includes('network error') ||
+          error.message?.toLowerCase().includes('timeout'))) ||
+      isServerlessInvocationError;
 
     if (isNetworkUnreachable && error.config) {
       const config = error.config;
@@ -1287,8 +1311,18 @@ api.interceptors.response.use(
         return createAxiosResponse(updatedRecord, 200, config);
       }
 
-      if (patientDetailMatch && method === 'delete') {
-        const patientId = decodeURIComponent(patientDetailMatch[1]);
+      const nestedDoctorPatientDeleteMatch = url.match(
+        /\/doctors\/([^/?#]+)\/patients\/([^/?#]+)$/
+      );
+      if (
+        (patientDetailMatch || nestedDoctorPatientDeleteMatch) &&
+        method === 'delete'
+      ) {
+        const patientId = decodeURIComponent(
+          nestedDoctorPatientDeleteMatch
+            ? nestedDoctorPatientDeleteMatch[2]
+            : patientDetailMatch![1]
+        );
         if (typeof window !== 'undefined') {
           const deletedRaw = localStorage.getItem('dt_deleted_patients');
           const deletedIds: string[] = deletedRaw ? JSON.parse(deletedRaw) : [];

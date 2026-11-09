@@ -39,8 +39,8 @@ export default function LoginPage() {
   } = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
-      email: 'admin@doctortracker.io',
-      password: 'ClinicalPassword2026',
+      email: 'admin@doctortracker.com',
+      password: 'Admin@12345',
     },
   });
 
@@ -72,8 +72,8 @@ export default function LoginPage() {
   };
 
   const handleFillDemo = () => {
-    setValue('email', 'e.rostova@doctortracker.io', { shouldValidate: true });
-    setValue('password', 'Clinical2026!', { shouldValidate: true });
+    setValue('email', 'admin@doctortracker.com', { shouldValidate: true });
+    setValue('password', 'Admin@12345', { shouldValidate: true });
   };
 
   const handleTestErrorToast = async () => {

@@ -8,7 +8,7 @@ export default defineConfig(({mode}) => {
   const nextPublicApiUrl =
     env.NEXT_PUBLIC_API_URL ||
     process.env.NEXT_PUBLIC_API_URL ||
-    'http://localhost:4000/api';
+    'https://doctor-tracker-backend-care-guide.vercel.app/';
 
   return {
     plugins: [react(), tailwindcss()],

@@ -23,7 +23,23 @@ import type {
   UpdatePatientPayload,
 } from '@/types';
 
-function normalizeDoctor(raw: Partial<Doctor> & Record<string, unknown>): Doctor {
+function unwrapEntity<T>(payload: unknown): T {
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'data' in payload &&
+    (payload as { data?: unknown }).data &&
+    !Array.isArray((payload as { data?: unknown }).data)
+  ) {
+    return (payload as { data: T }).data;
+  }
+  return payload as T;
+}
+
+function normalizeDoctor(rawInput: unknown): Doctor {
+  const raw = (unwrapEntity<Record<string, unknown>>(rawInput) || {}) as Partial<Doctor> &
+    Record<string, unknown>;
+  const id = String(raw.id || raw._id || `doc-${Date.now()}`);
   const name = String(raw.name || raw.fullName || 'Dr. Unknown');
   const specialization = String(
     raw.specialization || raw.specialty || 'General Medicine'
@@ -37,7 +53,7 @@ function normalizeDoctor(raw: Partial<Doctor> & Record<string, unknown>): Doctor
   );
 
   return {
-    id: String(raw.id || `doc-${Date.now()}`),
+    id,
     name,
     specialization,
     hospital,
@@ -49,7 +65,7 @@ function normalizeDoctor(raw: Partial<Doctor> & Record<string, unknown>): Doctor
     department: String(raw.department || specialization),
     licenseNumber: String(raw.licenseNumber || 'MD-90000-CA'),
     status: (raw.status as Doctor['status']) || 'ON_DUTY',
-    activePatientsCount: Number(raw.activePatientsCount ?? 0),
+    activePatientsCount: Number(raw.activePatientsCount ?? raw.patientCount ?? 0),
     todayAppointmentsCount: Number(raw.todayAppointmentsCount ?? 0),
     nextAvailableSlot: String(
       raw.nextAvailableSlot || new Date(Date.now() + 7200 * 1000).toISOString()
@@ -58,14 +74,36 @@ function normalizeDoctor(raw: Partial<Doctor> & Record<string, unknown>): Doctor
   };
 }
 
-function normalizePatient(raw: Partial<Patient> & Record<string, unknown>): Patient {
+function normalizePatient(rawInput: unknown): Patient {
+  const raw = (unwrapEntity<Record<string, unknown>>(rawInput) || {}) as Partial<Patient> &
+    Record<string, unknown>;
+
+  const populatedDoctor =
+    raw.doctor && typeof raw.doctor === 'object'
+      ? (raw.doctor as Record<string, unknown>)
+      : null;
+
+  const id = String(raw.id || raw._id || `pat-${Date.now()}`);
   const name = String(raw.name || raw.fullName || 'Unknown Patient');
   const condition = String(
     raw.condition || raw.primaryDiagnosis || 'General Evaluation'
   );
-  const doctorId = String(raw.doctorId || raw.assignedDoctorId || 'doc-101');
+  const doctorId = String(
+    raw.doctorId ||
+      raw.assignedDoctorId ||
+      populatedDoctor?._id ||
+      populatedDoctor?.id ||
+      (typeof raw.doctor === 'string' ? raw.doctor : '') ||
+      'doc-101'
+  );
   const doctorName = String(
-    raw.doctorName || raw.assignedDoctorName || 'Dr. Elena Rostova'
+    raw.doctorName ||
+      raw.assignedDoctorName ||
+      populatedDoctor?.name ||
+      'Dr. Elena Rostova'
+  );
+  const department = String(
+    raw.department || populatedDoctor?.specialization || 'Cardiology'
   );
   const lastVisitDate = String(
     raw.lastVisitDate || raw.createdAt || new Date().toISOString()
@@ -73,10 +111,10 @@ function normalizePatient(raw: Partial<Patient> & Record<string, unknown>): Pati
   const age = Number(raw.age ?? 45);
 
   return {
-    id: String(raw.id || `pat-${Date.now()}`),
+    id,
     name,
     fullName: String(raw.fullName || name),
-    mrn: String(raw.mrn || `MRN-${Math.floor(100000 + Math.random() * 900000)}`),
+    mrn: String(raw.mrn || `MRN-${id.slice(-6).toUpperCase()}`),
     dateOfBirth: String(raw.dateOfBirth || `${2026 - age}-05-14`),
     age,
     gender: String(raw.gender || 'Female'),
@@ -87,7 +125,7 @@ function normalizePatient(raw: Partial<Patient> & Record<string, unknown>): Pati
     doctorName,
     assignedDoctorId: String(raw.assignedDoctorId || doctorId),
     assignedDoctorName: doctorName,
-    department: String(raw.department || 'Cardiology'),
+    department,
     acuity: (raw.acuity as Patient['acuity']) || 'STABLE',
     createdAt: String(raw.createdAt || lastVisitDate),
     lastVisitDate,
@@ -113,15 +151,90 @@ export function useDashboardSummary(enabled = true) {
 /**
  * Fetches dashboard statistics and chart series from GET /dashboard/stats
  * for the selected 7 / 30 / 90 day range using a stable primitive query key.
+ * Normalizes both backend aggregation format (`newThisWeek`, `doctorsOverTime`, `patientsPerDoctor[].name`)
+ * and frontend `DashboardStats` format.
  */
 export function useDashboardStats(range: DashboardRange = 30, enabled = true) {
   return useQuery<DashboardStats>({
     queryKey: ['dashboard', 'stats', range],
     queryFn: async () => {
-      const { data } = await api.get<DashboardStats>('/dashboard/stats', {
-        params: { range, days: range },
+      const { data: raw } = await api.get<Record<string, unknown>>(
+        '/dashboard/stats',
+        {
+          params: { range, days: range },
+        }
+      );
+
+      const newThisWeek =
+        raw.newThisWeek && typeof raw.newThisWeek === 'object'
+          ? (raw.newThisWeek as { doctors?: number; patients?: number })
+          : undefined;
+
+      const rawPatientsPerDoctor = Array.isArray(raw.patientsPerDoctor)
+        ? (raw.patientsPerDoctor as Record<string, unknown>[])
+        : [];
+
+      const patientsPerDoctor = rawPatientsPerDoctor.map((item, idx) => ({
+        doctorId: String(item.doctorId || item._id || `doc-${idx}`),
+        doctorName: String(item.doctorName || item.name || 'Doctor'),
+        specialization: String(item.specialization || 'General'),
+        count: Number(item.count ?? item.patientCount ?? 0),
+      }));
+
+      const rawPatientsOverTime = Array.isArray(raw.patientsOverTime)
+        ? (raw.patientsOverTime as Record<string, unknown>[])
+        : [];
+      const patientsOverTime = rawPatientsOverTime.map((pt) => ({
+        date: String(pt.date || ''),
+        count: Number(pt.count ?? 0),
+      }));
+
+      const rawConditions = Array.isArray(raw.conditionBreakdown)
+        ? (raw.conditionBreakdown as Record<string, unknown>[])
+        : [];
+      const totalConditionPatients = Math.max(
+        1,
+        rawConditions.reduce((sum, item) => sum + Number(item.count ?? 0), 0)
+      );
+      const conditionBreakdown = rawConditions.map((item) => {
+        const count = Number(item.count ?? 0);
+        const percentage =
+          typeof item.percentage === 'number'
+            ? item.percentage
+            : Math.round((count / totalConditionPatients) * 100);
+        return {
+          condition: String(item.condition || 'Unspecified'),
+          count,
+          percentage,
+        };
       });
-      return data;
+
+      const rawDoctorsWeekly = Array.isArray(raw.doctorsAddedPerWeek)
+        ? (raw.doctorsAddedPerWeek as Record<string, unknown>[])
+        : Array.isArray(raw.doctorsOverTime)
+        ? (raw.doctorsOverTime as Record<string, unknown>[])
+        : [];
+
+      const doctorsAddedPerWeek = rawDoctorsWeekly.map((pt) => ({
+        week: String(pt.week || pt.date || ''),
+        count: Number(pt.count ?? 0),
+      }));
+
+      return {
+        range,
+        totalDoctors: Number(raw.totalDoctors ?? 0),
+        totalPatients: Number(raw.totalPatients ?? 0),
+        newDoctorsThisWeek: Number(
+          raw.newDoctorsThisWeek ?? newThisWeek?.doctors ?? 0
+        ),
+        newPatientsThisWeek: Number(
+          raw.newPatientsThisWeek ?? newThisWeek?.patients ?? 0
+        ),
+        patientsPerDoctor,
+        patientsOverTime,
+        conditionBreakdown,
+        doctorsAddedPerWeek,
+      };
     },
     placeholderData: keepPreviousData,
     enabled,
@@ -152,27 +265,28 @@ export function useDoctorsPaginated(params: DoctorsQueryParams, enabled = true) 
       to,
     ],
     queryFn: async () => {
-      const { data } = await api.get<
-        PaginatedDoctorsResponse | Doctor[] | { items?: Doctor[]; total?: number }
-      >('/doctors', {
-        params: {
-          page,
-          limit,
-          search: search || undefined,
-          specialization:
-            specialization && specialization !== 'ALL'
-              ? specialization
-              : undefined,
-          hospital: hospital && hospital !== 'ALL' ? hospital : undefined,
-          from: from || undefined,
-          to: to || undefined,
-        },
-      });
+      const { data } = await api.get<Record<string, unknown> | Doctor[]>(
+        '/doctors',
+        {
+          params: {
+            page,
+            limit,
+            search: search || undefined,
+            specialization:
+              specialization && specialization !== 'ALL'
+                ? specialization
+                : undefined,
+            hospital: hospital && hospital !== 'ALL' ? hospital : undefined,
+            from: from || undefined,
+            to: to || undefined,
+            startDate: from || undefined,
+            endDate: to || undefined,
+          },
+        }
+      );
 
       if (Array.isArray(data)) {
-        const normalized = data.map((d) =>
-          normalizeDoctor(d as Partial<Doctor> & Record<string, unknown>)
-        );
+        const normalized = data.map((d) => normalizeDoctor(d));
         const start = (page - 1) * limit;
         return {
           data: normalized.slice(start, start + limit),
@@ -189,33 +303,52 @@ export function useDoctorsPaginated(params: DoctorsQueryParams, enabled = true) 
         };
       }
 
-      if ('data' in data && Array.isArray(data.data)) {
-        return {
-          ...data,
-          data: data.data.map((d) =>
-            normalizeDoctor(d as Partial<Doctor> & Record<string, unknown>)
-          ),
-        };
-      }
+      const rawItems = Array.isArray(data.data)
+        ? data.data
+        : Array.isArray(data.items)
+        ? data.items
+        : [];
+      const normalizedItems = rawItems.map((d) => normalizeDoctor(d));
 
-      const items = ('items' in data && Array.isArray(data.items) ? data.items : []).map(
-        (d) => normalizeDoctor(d as Partial<Doctor> & Record<string, unknown>)
+      const pagination =
+        data.pagination && typeof data.pagination === 'object'
+          ? (data.pagination as {
+              total?: number;
+              page?: number;
+              limit?: number;
+              totalPages?: number;
+            })
+          : undefined;
+
+      const total = Number(
+        pagination?.total ?? data.total ?? normalizedItems.length
       );
-      const total =
-        'total' in data && typeof data.total === 'number'
-          ? data.total
-          : items.length;
+      const resolvedPage = Number(pagination?.page ?? data.page ?? page);
+      const resolvedLimit = Number(pagination?.limit ?? data.limit ?? limit);
+      const totalPages = Number(
+        pagination?.totalPages ??
+          data.totalPages ??
+          Math.max(1, Math.ceil(total / resolvedLimit))
+      );
+
+      const specializations = Array.isArray(data.specializations)
+        ? (data.specializations as string[])
+        : Array.from(
+            new Set(normalizedItems.map((d) => d.specialization))
+          ).sort();
+
+      const hospitals = Array.isArray(data.hospitals)
+        ? (data.hospitals as string[])
+        : Array.from(new Set(normalizedItems.map((d) => d.hospital))).sort();
 
       return {
-        data: items,
+        data: normalizedItems,
         total,
-        page,
-        limit,
-        totalPages: Math.max(1, Math.ceil(total / limit)),
-        specializations: Array.from(
-          new Set(items.map((d) => d.specialization))
-        ).sort(),
-        hospitals: Array.from(new Set(items.map((d) => d.hospital))).sort(),
+        page: resolvedPage,
+        limit: resolvedLimit,
+        totalPages,
+        specializations,
+        hospitals,
       };
     },
     placeholderData: keepPreviousData,
@@ -227,11 +360,12 @@ export function useDoctors(enabled = true) {
   return useQuery<Doctor[]>({
     queryKey: ['doctors', 'all'],
     queryFn: async () => {
-      const { data } = await api.get<Doctor[] | PaginatedDoctorsResponse>('/doctors');
-      const rawList = Array.isArray(data) ? data : data.data || [];
-      return rawList.map((d) =>
-        normalizeDoctor(d as Partial<Doctor> & Record<string, unknown>)
+      const { data } = await api.get<Doctor[] | PaginatedDoctorsResponse>(
+        '/doctors',
+        { params: { limit: 100 } }
       );
+      const rawList = Array.isArray(data) ? data : data.data || [];
+      return rawList.map((d) => normalizeDoctor(d));
     },
     enabled,
   });
@@ -242,7 +376,7 @@ export function useDoctor(id: string, enabled = true) {
     queryKey: ['doctors', 'detail', id],
     queryFn: async () => {
       const { data } = await api.get<Doctor>(`/doctors/${id}`);
-      return normalizeDoctor(data as Partial<Doctor> & Record<string, unknown>);
+      return normalizeDoctor(data);
     },
     enabled: Boolean(id) && enabled,
   });
@@ -257,20 +391,19 @@ export function useDoctorPatients(
   return useQuery<PaginatedPatientsResponse>({
     queryKey: ['doctors', 'patients', doctorId, page, limit, search],
     queryFn: async () => {
-      const { data } = await api.get<
-        PaginatedPatientsResponse | Patient[]
-      >(`/doctors/${doctorId}/patients`, {
-        params: {
-          page,
-          limit,
-          search: search || undefined,
-        },
-      });
+      const { data } = await api.get<Record<string, unknown> | Patient[]>(
+        `/doctors/${doctorId}/patients`,
+        {
+          params: {
+            page,
+            limit,
+            search: search || undefined,
+          },
+        }
+      );
 
       if (Array.isArray(data)) {
-        const normalized = data.map((p) =>
-          normalizePatient(p as Partial<Patient> & Record<string, unknown>)
-        );
+        const normalized = data.map((p) => normalizePatient(p));
         const start = (page - 1) * limit;
         return {
           data: normalized.slice(start, start + limit),
@@ -281,11 +414,35 @@ export function useDoctorPatients(
         };
       }
 
+      const rawItems = Array.isArray(data.data) ? data.data : [];
+      const normalizedItems = rawItems.map((p) => normalizePatient(p));
+      const pagination =
+        data.pagination && typeof data.pagination === 'object'
+          ? (data.pagination as {
+              total?: number;
+              page?: number;
+              limit?: number;
+              totalPages?: number;
+            })
+          : undefined;
+
+      const total = Number(
+        pagination?.total ?? data.total ?? normalizedItems.length
+      );
+      const resolvedPage = Number(pagination?.page ?? data.page ?? page);
+      const resolvedLimit = Number(pagination?.limit ?? data.limit ?? limit);
+      const totalPages = Number(
+        pagination?.totalPages ??
+          data.totalPages ??
+          Math.max(1, Math.ceil(total / resolvedLimit))
+      );
+
       return {
-        ...data,
-        data: (data.data || []).map((p) =>
-          normalizePatient(p as Partial<Patient> & Record<string, unknown>)
-        ),
+        data: normalizedItems,
+        total,
+        page: resolvedPage,
+        limit: resolvedLimit,
+        totalPages,
       };
     },
     placeholderData: keepPreviousData,
@@ -317,24 +474,29 @@ export function usePatientsPaginated(params: PatientsQueryParams, enabled = true
       to,
     ],
     queryFn: async () => {
-      const { data } = await api.get<
-        PaginatedPatientsResponse | Patient[]
-      >('/patients', {
-        params: {
-          page,
-          limit,
-          search: search || undefined,
-          condition: condition && condition !== 'ALL' ? condition : undefined,
-          doctorId: doctorId && doctorId !== 'ALL' ? doctorId : undefined,
-          from: from || undefined,
-          to: to || undefined,
-        },
-      });
+      const resolvedDocParam =
+        doctorId && doctorId !== 'ALL' ? doctorId : undefined;
+      const { data } = await api.get<Record<string, unknown> | Patient[]>(
+        '/patients',
+        {
+          params: {
+            page,
+            limit,
+            search: search || undefined,
+            condition:
+              condition && condition !== 'ALL' ? condition : undefined,
+            doctorId: resolvedDocParam,
+            doctor: resolvedDocParam,
+            from: from || undefined,
+            to: to || undefined,
+            startDate: from || undefined,
+            endDate: to || undefined,
+          },
+        }
+      );
 
       if (Array.isArray(data)) {
-        const normalized = data.map((p) =>
-          normalizePatient(p as Partial<Patient> & Record<string, unknown>)
-        );
+        const normalized = data.map((p) => normalizePatient(p));
         const start = (page - 1) * limit;
         return {
           data: normalized.slice(start, start + limit),
@@ -348,11 +510,41 @@ export function usePatientsPaginated(params: PatientsQueryParams, enabled = true
         };
       }
 
+      const rawItems = Array.isArray(data.data) ? data.data : [];
+      const normalizedItems = rawItems.map((p) => normalizePatient(p));
+      const pagination =
+        data.pagination && typeof data.pagination === 'object'
+          ? (data.pagination as {
+              total?: number;
+              page?: number;
+              limit?: number;
+              totalPages?: number;
+            })
+          : undefined;
+
+      const total = Number(
+        pagination?.total ?? data.total ?? normalizedItems.length
+      );
+      const resolvedPage = Number(pagination?.page ?? data.page ?? page);
+      const resolvedLimit = Number(pagination?.limit ?? data.limit ?? limit);
+      const totalPages = Number(
+        pagination?.totalPages ??
+          data.totalPages ??
+          Math.max(1, Math.ceil(total / resolvedLimit))
+      );
+
       return {
-        ...data,
-        data: (data.data || []).map((p) =>
-          normalizePatient(p as Partial<Patient> & Record<string, unknown>)
-        ),
+        data: normalizedItems,
+        total,
+        page: resolvedPage,
+        limit: resolvedLimit,
+        totalPages,
+        conditions: Array.isArray(data.conditions)
+          ? (data.conditions as string[])
+          : undefined,
+        doctors: Array.isArray(data.doctors)
+          ? (data.doctors as { id: string; name: string }[])
+          : undefined,
       };
     },
     placeholderData: keepPreviousData,
@@ -365,7 +557,7 @@ export function useCreateDoctor() {
   return useMutation({
     mutationFn: async (payload: CreateDoctorPayload | Partial<Doctor>) => {
       const { data } = await api.post<Doctor>('/doctors', payload);
-      return normalizeDoctor(data as Partial<Doctor> & Record<string, unknown>);
+      return normalizeDoctor(data);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['doctors'] });
@@ -393,12 +585,11 @@ export function usePatients(enabled = true) {
     queryKey: ['patients', 'all'],
     queryFn: async () => {
       const { data } = await api.get<Patient[] | PaginatedPatientsResponse>(
-        '/patients'
+        '/patients',
+        { params: { limit: 100 } }
       );
       const rawList = Array.isArray(data) ? data : data.data || [];
-      return rawList.map((p) =>
-        normalizePatient(p as Partial<Patient> & Record<string, unknown>)
-      );
+      return rawList.map((p) => normalizePatient(p));
     },
     enabled,
   });
@@ -411,8 +602,11 @@ export function useCreatePatient() {
       const doctorId =
         payload.doctorId || (payload as Partial<Patient>).assignedDoctorId;
       const endpoint = doctorId ? `/doctors/${doctorId}/patients` : '/patients';
-      const { data } = await api.post<Patient>(endpoint, payload);
-      return normalizePatient(data as Partial<Patient> & Record<string, unknown>);
+      const { data } = await api.post<Patient>(endpoint, {
+        ...payload,
+        doctor: doctorId,
+      });
+      return normalizePatient(data);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['patients'] });
@@ -432,8 +626,11 @@ export function useUpdatePatient() {
       id: string;
       payload: UpdatePatientPayload;
     }) => {
-      const { data } = await api.patch<Patient>(`/patients/${id}`, payload);
-      return normalizePatient(data as Partial<Patient> & Record<string, unknown>);
+      const { data } = await api.patch<Patient>(`/patients/${id}`, {
+        ...payload,
+        ...(payload.doctorId ? { doctor: payload.doctorId } : {}),
+      });
+      return normalizePatient(data);
     },
     onMutate: async ({ id, payload }) => {
       await queryClient.cancelQueries({ queryKey: ['patients'] });
