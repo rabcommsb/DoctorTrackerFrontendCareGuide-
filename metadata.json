@@ -1,0 +1,8 @@
+{
+  "name": "doctor-tracker-frontend",
+  "description": "Next.js App Router clinical frontend for tracking doctors, patients, and appointments via REST API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
